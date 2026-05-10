@@ -72,11 +72,13 @@ def main():
     m:int = 64
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for _ in range (0,100):
+    for _ in range(0,20):
         t = time.time_ns()
-        mat = torch.from_numpy((random_arr(n,m)))
-        vec = torch.from_numpy((random_vec(n)))
-        ridge_fit_predict(mat,vec,device,1e-12)
-        ##print((time.time_ns() - t) / 1_000_000)
+        for _ in range (0,100):
+            
+            mat = torch.from_numpy((random_arr(n,m)))
+            vec = torch.from_numpy((random_vec(n)))
+            ridge_fit_predict(mat,vec,device,1e-12)
+        print((time.time_ns() - t) / 1_000_000)
 
 main()

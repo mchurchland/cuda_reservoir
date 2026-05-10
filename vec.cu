@@ -18,8 +18,8 @@
 #include <vector>
 #include <typeinfo>
 #include <chrono>
-#define THR_PER_BLK 256
-#define BLK_IN_GRID 256
+#define THR_PER_BLK 64
+#define BLK_IN_GRID 64
 /**
 cublas does column major order
 conda activate cuda13
@@ -28,129 +28,17 @@ nvcc -std=c++17 -dlto  -arch=sm_89 -I "$MATHDX/include"   -I "$MATHDX/external/c
 
  */
 
-
-
 void print_arr(float * d_c,int n,int m){
     //https://stackoverflow.com/questions/2168082/how-to-rewrite-array-from-row-order-to-column-order
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
             printf("%f ", d_c[j*n + i]);
+            }
         }
         printf("\n");
     }
-}
-
-template<unsigned M, unsigned N, unsigned NT>
-
-__global__ __launch_bounds__(NT) void inv_kernel(float* A, unsigned lda, float* B, float* x, int* info) {
-
-    // To maximize parallelism, we compute [G v] = A' * [A b] with a single GEMM, then solve Gx = v
-    // The matrices are assumed to be stored in column-major format
-    // (M + N) * (N + 1) words of dynamic shared memory are required Ax = ID, x is the inverse
-    // Setup shared memory
-    extern __shared__ __align__(16) cusolverdx::byte shared_mem[]; // not sure why im doing 16: its for 128 bit
-    // Slice shared memory into pointers
-    // Note that in memory, we have the augmented matrices [As Bs]
-    auto [As, Bs] = cusolverdx::shared_memory::slice<float, float>(
-        shared_mem,
-        alignof(float), M * M,
-        alignof(float), M*M
-    );
-    __syncthreads();
 
 
-
-    using          prec = float;
-
-    using POSV = decltype(cusolverdx::Function<cusolverdx::posv>() + cusolverdx::Size<N, N, N>() + cusolverdx::FillMode<cusolverdx::lower>() +
-                          cusolverdx::Precision<prec>() + cusolverdx::Type<cusolverdx::type::real>() + cusolverdx::Block() + cusolverdx::BlockDim<NT>() + cusolverdx::SM<890>());
-
-    //// Load data from global memory
-    cusolverdx::copy_2d<NT, M, M, cusolverdx::arrangement::col_major>(A, lda, As, M);// memory loads are good
-    cusolverdx::copy_2d<NT, M, M, cusolverdx::arrangement::col_major>(B, lda, Bs, M);
-
-
-    __syncthreads();
-    POSV().execute(As, Bs, info);
-
-    //// store solution back to global memory
-    __syncthreads();
-    cusolverdx::copy_2d<NT, N, N, cusolverdx::arrangement::col_major>(Bs, N, x, N); // 1d solve
-}
-template<int Arch,unsigned int unsigned_n>
-float * INV_dx(float * d_A,float * d_B) {
-    
-    using namespace cusolverdx;
-    using Solver = decltype(Size<unsigned_n, unsigned_n>() + Precision<float>() + Type<type::real>() + Function<posv>() + LeadingDimension<unsigned_n>() + SM<Arch>() +
-                            BlockDim<256>() + FillMode<fill_mode::upper>() + Block());
-
-    using data_type      = typename Solver::a_data_type;
-    using cuda_data_type = typename Solver::a_cuda_data_type;
-
-    constexpr auto m = Solver::m_size;
-    constexpr auto n = Solver::n_size;
-    static_assert(m == n, "posv is for Hermitian positive-definite matrix matrix only");
-    constexpr auto lda_smem = Solver::lda;
-    float * out = nullptr;
-    constexpr auto lda        = m; // this is the leading dimension in global memory for A
-    constexpr auto input_size = lda * n; // input global memory size for A
-
-    //std::cout << "Use compile-time leading dimension LDA for shared memory = " << lda_smem << std::endl;
-
-
-    std::vector<data_type> L(input_size);
-    int                    info   = 0;
-    int*                   d_info = nullptr; /* error info */
-
-    (cudaMalloc(&d_info, sizeof(int)));
-    cudaMalloc(&out, n*m*sizeof(float));
-    constexpr unsigned ne_required_smem = ((m + n) * (n + 1) + n) * sizeof(data_type); // this might be able to be adjusted
-        size_t bytes = n*m * sizeof(float);
-    float * out2 =(float *)malloc(bytes);
-
-    cudaMemcpy(out2, d_A, bytes, cudaMemcpyDeviceToHost);
-    //Invokes kernel
-    constexpr unsigned ne_NT   = 32;
-    using KernelPtr = void (*) (float *, unsigned, float *, float *, int *);
-    KernelPtr ne_kernel = inv_kernel<unsigned_n,unsigned_n,ne_NT>;
-    (cudaFuncSetAttribute(ne_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, ne_required_smem));
-    //block in grid thread in block
-    constexpr unsigned batches = 1;
-    cudaStream_t stream = nullptr;
-    (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-
-    cudaGetLastError();
-    const auto run_ne_d_impl = [&](cudaStream_t str) {
-        ne_kernel<<<batches, ne_NT, ne_required_smem, str>>>(d_A,unsigned_n,d_B,out,d_info);
-    };
-    run_ne_d_impl(stream);
-        //cudaError_t err = cudaGetLastError();
-        
-        #define CUDA_CHECK(call) do {                                      \
-    cudaError_t err__ = (call);                                    \
-    if (err__ != cudaSuccess) {                                    \
-        fprintf(stderr,                                           \
-            "CUDA error at %s:%d: %s (%s)\n",                     \
-            __FILE__, __LINE__,                                   \
-            cudaGetErrorName(err__), cudaGetErrorString(err__));   \
-        exit(1);                                                   \
-    }                                                             \
-} while (0)
-CUDA_CHECK(cudaPeekAtLastError());     // catches launch/config argument errors
-CUDA_CHECK(cudaDeviceSynchronize());   // catches runtime/device-side errors
-
-
-    (cudaMemcpyAsync(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost, stream));
-
-    (cudaStreamSynchronize(stream));
-
-    //=========================
-    // cuSolver reference
-    //=========================
-    // Use dumb B as only factorization is performed
-    (cudaFree(d_info));
-    return out;
-}
 
 
 void print_vec(float * d_c,int n){
@@ -166,6 +54,7 @@ void print_cuda(float * h_c,int n,int m){
     cudaMemcpy(out, h_c, bytes, cudaMemcpyDeviceToHost);
     print_arr(out,n,m);
 }
+
 
 void print_cuda_vec(float * d_c,int n){
     size_t bytes = n * sizeof(float);
@@ -271,6 +160,119 @@ float *XTY(float * X, float * Y,int m, int n,int k ){
 
     return d_c;
 }
+
+
+template<unsigned M, unsigned N, unsigned NT>
+__global__ __launch_bounds__(NT) void inv_kernel(float* A, unsigned lda, float* B, float* x, int* info) {
+
+    // To maximize parallelism, we compute [G v] = A' * [A b] with a single GEMM, then solve Gx = v
+    // The matrices are assumed to be stored in column-major format
+    // (M + N) * (N + 1) words of dynamic shared memory are required Ax = ID, x is the inverse
+    // Setup shared memory
+    extern __shared__ __align__(16) cusolverdx::byte shared_mem[]; // not sure why im doing 16: its for 128 bit
+    // Slice shared memory into pointers
+    // Note that in memory, we have the augmented matrices [As Bs]
+    auto [As, Bs] = cusolverdx::shared_memory::slice<float, float>(
+        shared_mem,
+        alignof(float), M * M,
+        alignof(float), M*M
+    );
+    __syncthreads();
+
+    using          prec = float;
+
+    using POSV = decltype(cusolverdx::Function<cusolverdx::posv>() + cusolverdx::Size<N, N, N>() + cusolverdx::FillMode<cusolverdx::lower>() +
+                          cusolverdx::Precision<prec>() + cusolverdx::Type<cusolverdx::type::real>() + cusolverdx::Block() + cusolverdx::BlockDim<NT>() + cusolverdx::SM<890>());
+
+    //// Load data from global memory
+    __syncthreads();
+    cusolverdx::copy_2d<NT, M, M, cusolverdx::arrangement::col_major>(A, lda, As, M);// memory loads are good
+    cusolverdx::copy_2d<NT, M, M, cusolverdx::arrangement::col_major>(B, lda, Bs, M);
+
+
+    __syncthreads();
+    POSV().execute(As, Bs, info);
+
+    //// store solution back to global memory
+    __syncthreads();
+    cusolverdx::copy_2d<NT, N, N, cusolverdx::arrangement::col_major>(Bs, N, x, N); // 1d solve
+}
+template<int Arch,unsigned int unsigned_n>
+float * INV_dx(float * d_A,float * d_B) {
+    
+    using namespace cusolverdx;
+    using Solver = decltype(Size<unsigned_n, unsigned_n>() + Precision<float>() + Type<type::real>() + Function<posv>() + LeadingDimension<unsigned_n>() + SM<Arch>() +
+                            BlockDim<256>() + FillMode<fill_mode::upper>() + Block());
+
+    using data_type      = typename Solver::a_data_type;
+    using cuda_data_type = typename Solver::a_cuda_data_type;
+
+    constexpr auto m = Solver::m_size;
+    constexpr auto n = Solver::n_size;
+    static_assert(m == n, "posv is for Hermitian positive-definite matrix matrix only");
+    constexpr auto lda_smem = Solver::lda;
+    float * out = nullptr;
+    constexpr auto lda        = m; // this is the leading dimension in global memory for A
+    constexpr auto input_size = lda * n; // input global memory size for A
+
+    //std::cout << "Use compile-time leading dimension LDA for shared memory = " << lda_smem << std::endl;
+
+
+    std::vector<data_type> L(input_size);
+    int                    info   = 0;
+    int*                   d_info = nullptr; /* error info */
+
+    (cudaMalloc(&d_info, sizeof(int)));
+    cudaMalloc(&out, n*m*sizeof(float));
+    constexpr unsigned ne_required_smem = ((m + n) * (n + 1) + n) * sizeof(data_type); // this might be able to be adjusted
+        size_t bytes = n*m * sizeof(float);
+
+    //Invokes kernel
+    //constexpr unsigned ne_NT   = 32;
+    using KernelPtr = void (*) (float *, unsigned, float *, float *, int *);
+    KernelPtr ne_kernel = inv_kernel<unsigned_n,unsigned_n,THR_PER_BLK>; // this needs to be 32 for some reason otherwise it fails at times :(
+    (cudaFuncSetAttribute(ne_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, ne_required_smem));
+    //block in grid thread in block
+    //constexpr unsigned batches = 1;
+    cudaStream_t stream = nullptr;
+    (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+    cudaGetLastError();
+    const auto run_ne_d_impl = [&](cudaStream_t str) {
+        ne_kernel<<<BLK_IN_GRID, THR_PER_BLK, ne_required_smem, str>>>(d_A,unsigned_n,d_B,out,d_info);
+    };
+    
+    run_ne_d_impl(stream);
+    //print_cuda(out,m,n);
+    //printf("dead?");
+        //cudaError_t err = cudaGetLastError();
+        
+        #define CUDA_CHECK(call) do {                                      \
+    cudaError_t err__ = (call);                                    \
+    if (err__ != cudaSuccess) {                                    \
+        fprintf(stderr,                                           \
+            "CUDA error at %s:%d: %s (%s)\n",                     \
+            __FILE__, __LINE__,                                   \
+            cudaGetErrorName(err__), cudaGetErrorString(err__));   \
+        exit(1);                                                   \
+    }                                                             \
+} while (0)
+CUDA_CHECK(cudaPeekAtLastError());     // catches launch/config argument errors
+CUDA_CHECK(cudaDeviceSynchronize());   // catches runtime/device-side errors
+
+
+    (cudaMemcpyAsync(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost, stream));
+
+    (cudaStreamSynchronize(stream));
+
+    //=========================
+    // cuSolver reference
+    //=========================
+    // Use dumb B as only factorization is performed
+    (cudaFree(d_info));
+    return out;
+}
+
 float *XY(float * X, float * Y,int m, int n,int k ){
     const float alpha = 1.0f;
     const float beta  = 0.0f;
@@ -456,15 +458,16 @@ float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha){
     h_xtx = para_xtx.get();  // this is working
     
     h_xtxpLAMID = XPY(h_xtx,id,m,m);  // this is working
+    //print_cuda(h_xtxpLAMID,m,m);
+    h_xty = para_xty.get(); // this is working
 
     h_xtx_p_LAMID_INV = INV_dx<890,size_m>(h_xtxpLAMID,diag(1,m));
     //h_xtx_p_LAMID_INV = XINV(h_xtxpLAMID,m); // this is working
-
+    //print_cuda(h_xtx_p_LAMID_INV,m,m);
 
 
     //h_xtx_p_LAMID_INV  = INV_dx<890,size_n>(h_xtxpLAMID);
     
-    h_xty = para_xty.get(); // this is working
     //print_cuda(h_xtx_p_LAMID_INV,m,m);
     //print_cuda(XY(h_xtx,h_xtx_p_LAMID_INV,m,m,m),m,m);
     h_weights = XY(h_xtx_p_LAMID_INV,h_xty,m,1,m); //thios is a vector // x has dim mxm the xy is working
@@ -519,9 +522,8 @@ __global__ void reduce6(float *g_idata, float *g_odata, int n) {
         //g_idata why does thise sometimes have stuff and sometimes not
         // need to check thta i + block size is actually in the allocated memory cause its probably not
         sdata[tid] += g_idata[i]; //+ g_idata[i+blockSize]; 
-        i += gridSize; //somehow this is treating them like integers
+        i += gridSize; // I think this is wrong
         //printf("tid %d, val %f i %d, i+block %d \n ", tid, sdata[tid],i,i+blockSize); // this dosent when when i=i+blocksize
-   
     }
 
     
@@ -531,7 +533,9 @@ __global__ void reduce6(float *g_idata, float *g_odata, int n) {
     if (blockSize >= 256) { if (tid < 128) { sdata[tid] += sdata[tid + 128]; } __syncthreads(); }
     if (blockSize >= 128) { if (tid < 64) { sdata[tid] += sdata[tid + 64]; } __syncthreads(); }
     if (tid < 32) warpReduce<blockSize>(sdata, tid); // do it until we are small enough to fit in a warp
-    if (tid == 0) g_odata[blockIdx.x] = sdata[0]; 
+    if (tid == 0) {
+    g_odata[blockIdx.x] = sdata[0]; 
+}
 }
 
 
@@ -584,7 +588,7 @@ float sum(float * Y,int n,int blk_in_grid){ // y needs to be a cuda vector this 
 
     float * arr = vec_cuda_to_dev(Y,n);
 
-    float sum = std::accumulate(arr, arr + n, 0.0f);// can be removed after testing
+    //float sum = std::accumulate(arr, arr + n, 0.0f);// can be removed after testing
     reduce6<THR_PER_BLK><<< BLK_IN_GRID, THR_PER_BLK >>>(Y, d_out,n); // fucked up on floats
     float * h_out =(float *)malloc(vec_bytes);
     cudaMemcpy(h_out, d_out, vec_bytes, cudaMemcpyDeviceToHost);
@@ -592,7 +596,7 @@ float sum(float * Y,int n,int blk_in_grid){ // y needs to be a cuda vector this 
     float out = h_out[0];
     free(h_out);
     //printf("out %f\n sum %f\n", out,sum);
-    //assert(std::abs(sum-out) < 0.01);
+    //assert(std::abs(sum-out) < 2);
     return out;
 }
 
@@ -639,7 +643,8 @@ float * dif(float * Y, int n,  int blk_in_grid,bool sq)
 }
 
 float get_top(float * Y, float * Y_hat, int n,float alpha,int blk_in_grid,size_t vec_bytes){
-    return sum(mult(Y,Y_hat,n,blk_in_grid),n,blk_in_grid);
+    auto a= sum(mult(Y,Y_hat,n,blk_in_grid),n,blk_in_grid);
+    return a;
 }
 
 float get_bot(float * Y, float * Y_hat, int n,float alpha,int blk_in_grid,size_t vec_bytes){
@@ -655,29 +660,29 @@ float r2_score(float * Y, float * Y_hat, int n,float alpha){
     float * yt_sq = (float *)malloc(vec_bytes);
     float * yh_sq = (float *)malloc(vec_bytes);
     
+    //these could be done in parallel with careful gpu shared memory allocation, sum breaks if they are done in parallel rn
     std::future<float *> Y_tru = std::async(std::launch::async, dif, Y,n,blk_in_grid,false); 
+        yt = Y_tru.get();
     std::future<float *> Y_ha = std::async(std::launch::async, dif, Y_hat,n,blk_in_grid,false); 
+        yh = Y_ha.get();
     std::future<float *> Y_tru_sq = std::async(std::launch::async, dif, Y,n,blk_in_grid,true); 
+        yt_sq = Y_tru_sq.get();
     std::future<float *> Y_ha_sq = std::async(std::launch::async, dif, Y_hat,n,blk_in_grid,true); 
-    yt = Y_tru.get();
-    yh = Y_ha.get();
-    yt_sq = Y_tru_sq.get();
     yh_sq = Y_ha_sq.get();
+    //doing these sequentially is important because im using shared memory
     //printf("yt %f\n", yt);
     //printf("yh %f\n", yh);
     //printf("yt_sq %f\n", yt_sq);
     //printf("yh_sq %f\n", yh_sq);
 
 
-
+    //these could be done in parallel with careful gpu shared memory allocation, sum breaks if they are done in parallel rn
     std::future<float> para_top = std::async(std::launch::async, get_top, yt,yh,n,alpha,blk_in_grid,vec_bytes); 
+     float top = para_top.get();
     std::future<float> para_bot = std::async(std::launch::async, get_bot, yt_sq,yh_sq,n,alpha,blk_in_grid,vec_bytes); 
-    float top = para_top.get();
+   
     float bot = para_bot.get();
     //printf("top %f, bot %f\n", top,bot);
-     if (std::isnan(bot)) {
-        // sometimes this is nan this is not good, but I cant figure out why it happens it dosent happen very often something like 2/100 solves
-    }
     return std::pow((top/bot), 2);
 }
 
@@ -711,26 +716,19 @@ int main(void)
 
     constexpr int N =  n;
     constexpr int M =  m;
-    
+
     float matrix_A [n][m] ={};
     float matrix_B [n]= {};
     for( int j=0; j<20; j++){
-    auto start = std::chrono::steady_clock::now();
-    for( int i=0; i<100; i++){
+                    auto start = std::chrono::steady_clock::now();
 
+    for( int i=0; i<100; i++){
     //auto rand_start = std::chrono::steady_clock::now();
     rand_arr<N,M>(matrix_A,n,m);
     rand_vec<N>(matrix_B,n);
     //auto rand_end = std::chrono::steady_clock::now();
 
     //start += std::chrono::duration_cast<std::chrono::milliseconds>(rand_end - rand_start);
-    //printf( "Randomization Time elapsed: %lf\n", std::chrono::duration_cast<std::chrono::milliseconds>(rand_end - rand_start).count() );
-    //make seperate ones for train and test 
-    //we are going to chop different tau amounts this is probably done on cpu in parallel but the ridge and r2 on the cpu
-    // will need to be careful because we will stop working with square matrices
-    // we dont actually *NEED* to slice the input matrix, we just need to tell our function that our matrix is smaller than it is !!!!
-    //        yte = ute[:-tau]
-    //        Xtr_d = Xtr[tau:] ##so that they are the same dimensiobn
 
 
     float  *h_weights = nullptr;    
@@ -744,10 +742,14 @@ int main(void)
     // this is getting our y hat
     //this gives me different answers at times, idk why 
     //printf("\n\n\n");
-    if (r2_score(matrix_B,matrix_C,n,0.0001) < 0.2){
-        printf("q ");
+    //printf("\n");
+    //print_vec(matrix_B,M);
+    //printf("q\n");
+    //print_vec(matrix_C,M);
+    if (r2_score(matrix_B,matrix_C,n,0.0001)<0.2){
+        //printf("F ");
     }
-
+    //printf("%f, ", r2_score(matrix_B,matrix_C,n,0.0001));
     //printf("r2 score %f\n",  r2_score(matrix_B,matrix_C,n,0.0001));
     //print_vec(matrix_C,n);
 
@@ -757,7 +759,7 @@ int main(void)
         auto end = std::chrono::steady_clock::now();
     
     std::chrono::duration<double, std::milli> elapsed = end - start;
-    printf( "%lf,\n", elapsed.count() );}
+    printf( "%lf\n", elapsed.count() );}
     cudaDeviceReset();
     printf("Done\n");
     return 0;
