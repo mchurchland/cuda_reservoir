@@ -19,7 +19,7 @@
 #include <typeinfo>
 #include <chrono>
 #define THR_PER_BLK 128
-#define BLK_IN_GRID 128
+#define BLK_IN_GRID 64
 /**
 cublas does column major order
 conda activate cuda13
@@ -124,6 +124,8 @@ void rand_vec(float arr[size_n],int n){
     // with 1,100 the floats get super large (about 2/100 times) in xtx and thus lead to problems
     // it turns out that Floats are generally only reliable to 6-7 significant decimal digits. and thus here occasionally break when the numbers in the matrix are large
     // having an even distribution changes this as the negative numbers "dampen" the amplification during xtx
+    // I want to make it clear that this does consitute as AI use even though its the search engine, and If this bothers you in anyway please change it back to 1,100 and
+    // I would not have found these errors without the help of the search ai
     for (int i = 0; i < n; i++) {
             arr[i] = dis(gen);
             //printf("%f ",arr[i]);
@@ -149,19 +151,20 @@ void set_vec_val(float * h_a,int n,float val){
             h_a[i]= val;
     }
 }
-float *XTY(float * X, float * Y,int m, int n,int k,cublasHandle_t handle ){
+float *XTY_s(cublasHandle_t handle, cudaStream_t stream,
+             float *X, float *Y, int m, int n, int k)
+{
     const float alpha = 1.0f;
     const float beta  = 0.0f;
-    size_t bytes        = m*n * sizeof(float);
-    float  *d_c;
-
+    size_t bytes = m * n * sizeof(float);
+    float *d_c = nullptr;
     cudaMalloc(&d_c, bytes);
 
-    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, m, n ,k, &alpha, X, k, Y,k ,&beta, d_c, m);
-
+    cublasSetStream(handle, stream);
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                m, n, k, &alpha, X, k, Y, k, &beta, d_c, m);
     return d_c;
 }
-
 
 template<unsigned M, unsigned N, unsigned NT>
 __global__ __launch_bounds__(NT) void inv_kernel(float* A, unsigned lda, float* B, float* x, int* info) {
@@ -280,27 +283,33 @@ CUDA_CHECK(cudaDeviceSynchronize());   // catches runtime/device-side errors
     return out;
 }
 
-float *XY(float * X, float * Y,int m, int n,int k,cublasHandle_t handle  ){
+float *XY_s(cublasHandle_t handle, cudaStream_t stream,
+            float *X, float *Y, int m, int n, int k)
+{
     const float alpha = 1.0f;
     const float beta  = 0.0f;
-    size_t bytes        = m*n * sizeof(float);
-    float  *d_c;
-    cudaMalloc(&d_c, bytes);
-    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m,n,k, &alpha, X, m, Y,k ,&beta, d_c, m);
-    
+    size_t bytes = m * n * sizeof(float);
+    float *d_c = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_c, bytes));
+
+    cublasSetStream(handle, stream);
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                m, n, k, &alpha, X, m, Y, k, &beta, d_c, m);
     return d_c;
 }
 
-
-float *XPY(float * X, float * Y,int m, int n,cublasHandle_t handle ){
-    // this is assuming x and y are square and the same size
+float *XPY_s(cublasHandle_t handle, cudaStream_t stream,
+             float *X, float *Y, int m, int n)
+{
     const float alpha = 1.0f;
     const float beta  = 1.0f;
-    size_t bytes        = n*m * sizeof(float);
-    float  *d_c;
+    size_t bytes = m * n * sizeof(float);
+    float *d_c = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_c, bytes));
 
-    cudaMalloc(&d_c, bytes);
-    cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, &alpha, X, m, &beta, Y, n, d_c, n);
+    cublasSetStream(handle, stream);
+    cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                m, n, &alpha, X, m, &beta, Y, m, d_c, m);
     return d_c;
 }
 
@@ -317,24 +326,17 @@ __global__ void cuda_diag(float * c, int n,float val)
     }}
 }
 
-
-
-
-float * diag(float val,int n){ 
-    //the kernal was silently erroring, I googled this and found this (this was a link that google ai found) https://www.cs.emory.edu/~cheung/Courses/355/Syllabus/94-CUDA/error.html
-    // I couldnt figure out why it was silently erroring, because there was no error message and it would just return an empty array
-    size_t bytes = n*n * sizeof(float);
+float *diag_s(cudaStream_t stream, float val, int n)
+{
+    size_t bytes = n * n * sizeof(float);
     float *d_c = nullptr;
-    cudaMalloc(&d_c, bytes);
-    cuda_diag<<< BLK_IN_GRID, THR_PER_BLK >>>(d_c, n, val); // this is bad , could be easily better cause they all have to do n*n
-    cudaError_t err = cudaGetLastError();
-if (err != cudaSuccess) {
-    printf("Kernel launch error: %s\n", cudaGetErrorString(err));
-}
+    CUDA_CHECK(cudaMalloc(&d_c, bytes));
 
+    int total_elements = n * n;
+    int blocks = (total_elements + THR_PER_BLK - 1) / THR_PER_BLK;
+    cuda_diag<<<blocks, THR_PER_BLK, 0, stream>>>(d_c, n, val);
     return d_c;
 }
-
 float * XINV(float * d_A, int n){ // somehow these get really big sometimes this dosent work but only sometimes :)
 
     cudaStream_t stream = NULL;
@@ -344,7 +346,7 @@ float * XINV(float * d_A, int n){ // somehow these get really big sometimes this
     std::vector<int> Ipiv(n, 0);
     size_t bytes = n*n * sizeof(float);
     int info = 0;
-    float * d_B = diag(1,n); // this is writing over
+    //float * d_B = diag_s(1,n); // this is writing over
     //float *d_B = nullptr; /* device copy of B */
     int *d_Ipiv = nullptr; /* pivoting sequence */
     int *d_info = nullptr; /* error info */
@@ -358,6 +360,7 @@ float * XINV(float * d_A, int n){ // somehow these get really big sometimes this
     (cusolverDnCreate(&cusolverH));
     (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
     (cusolverDnSetStream(cusolverH, stream));
+    float * d_B = diag_s(stream,1,n); // this is writing over
 
     
     (cudaMalloc(&d_Ipiv, sizeof(int) * Ipiv.size()));
@@ -415,80 +418,80 @@ float * XINV(float * d_A, int n){ // somehow these get really big sometimes this
 
 
 template <unsigned int size_n, unsigned int size_m>
-float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha,cublasHandle_t handle ){
-    //assuming that Y is a vector maybe I want to add a case for this
-    size_t bytes        = n*m * sizeof(float);
-    size_t vec_bytes        = n * sizeof(float);
-    
-    
-    float *h_a = nullptr;
-    float *h_b = nullptr;
-    h_a = (float *)malloc(bytes);
-    h_b = (float *)malloc(vec_bytes);
+float *ridge_reg(float X[size_n][size_m], float *Y, int n, int m, float alpha,
+                 cublasHandle_t handle, cudaStream_t *streams)
+{
+    size_t bytes     = n * m * sizeof(float);
+    size_t vec_bytes = n * sizeof(float);
 
-
-    set_arr<size_n,size_m>(h_a,n,m, X);
-    set_vec(h_b,n, Y);
-    
-
+    // --- Convert host data to column-major and upload to device ---
+    float *h_a = (float *)malloc(bytes);
+    float *h_b = (float *)malloc(vec_bytes);
+    set_arr<size_n, size_m>(h_a, n, m, X);
+    set_vec(h_b, n, Y);
 
     float *d_a = nullptr;
     float *d_b = nullptr;
-    cudaMalloc(&d_a, bytes); //these are the cuda arrays
-    cudaMalloc(&d_b, vec_bytes);
-    cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, h_b, vec_bytes, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc(&d_a, bytes));
+    CUDA_CHECK(cudaMalloc(&d_b, vec_bytes));
+    CUDA_CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b, h_b, vec_bytes, cudaMemcpyHostToDevice));
 
-    //allocate memory needed for the computation
-    // I feel like this could be bad these are alocated on host memory but they are 
-    //just storing a pointer to device memory maybe they can be maller in size, like just the size of a pointer to a float
-    float  *h_xtx = nullptr;
-    float  *h_xtxpLAMID = nullptr;
-    float  *h_xtx_p_LAMID_INV = nullptr;
-    float  *h_xty = nullptr;
-    float  * h_weights = (float *)malloc(vec_bytes);
-    
-
-
-    std::future<float *> para_xtx = std::async(std::launch::async, XTY, d_a,d_a,m,m,n,handle);  //do these in parallel
-        h_xtx = para_xtx.get();  // this is working
-
-    std::future<float *> para_id = std::async(std::launch::async, diag, alpha,m); 
-        float * id = para_id.get(); // these are all kept on device
-    std::future<float *> para_xty = std::async(std::launch::async, XTY, d_a,d_b,m,1,n,handle); // x has dim nxm
-        h_xty = para_xty.get(); // this is working
-
-    h_xtxpLAMID = XPY(h_xtx,id,m,m,handle);  // this is working
-    //print_cuda(h_xtxpLAMID,m,m);
-
-    h_xtx_p_LAMID_INV = INV_dx<890,size_m>(h_xtxpLAMID,diag(1,m));
-    //h_xtx_p_LAMID_INV = XINV(h_xtxpLAMID,m); // this is working
-    //print_cuda(h_xtx_p_LAMID_INV,m,m);
-
-
-    //h_xtx_p_LAMID_INV  = INV_dx<890,size_n>(h_xtxpLAMID);
-    
-    //print_cuda(h_xtx_p_LAMID_INV,m,m);
-    //print_cuda(XY(h_xtx,h_xtx_p_LAMID_INV,m,m,m),m,m);
-    h_weights = XY(h_xtx_p_LAMID_INV,h_xty,m,1,m,handle); //thios is a vector // x has dim mxm the xy is working
-    //print_cuda_vec(h_weights,m);
-
-    cudaFree(h_xtx);
-
-    cudaFree(h_xtxpLAMID);
-
-    cudaFree(h_xtx_p_LAMID_INV);
-
-    cudaFree(h_xty);
-
-    cudaFree(id);
-    cudaFree(d_a);
-    cudaFree(d_b);
+    // Done with host staging buffers
     free(h_a);
     free(h_b);
 
+    // Unpack streams for readability
+    cudaStream_t stream1 = streams[0];
+    cudaStream_t stream2 = streams[1];
+    cudaStream_t stream3 = streams[2];
 
-    return h_weights;
+    // Stream 1: XTX = X^T * X   (m x m)
+    float *d_xtx = XTY_s(handle, stream1, d_a, d_a, m, m, n);
+
+    // Stream 2: diag_id = alpha * I   (m x m)
+    float *d_diag_id = diag_s(stream2, alpha, m);
+
+    // Stream 3: XTY = X^T * Y   (m x 1)
+    float *d_xty = XTY_s(handle, stream3, d_a, d_b, m, 1, n);
+
+    // --- Synchronize: s1 and s2
+    CUDA_CHECK(cudaStreamSynchronize(stream1));
+    CUDA_CHECK(cudaStreamSynchronize(stream2));
+
+    // ---  XPY -> INV -> final matmul ---
+
+    // Step: (X^T X) + alpha*I
+    float *d_xtx_plus_id = XPY_s(handle, stream1, d_xtx, d_diag_id, m, m);
+    CUDA_CHECK(cudaStreamSynchronize(stream1));  // XPY need to be done, finito before INV reads it
+
+    // Step: Invert (X^T X + alpha*I)
+    // Create identity matrix as RHS for the solve
+    float *d_inv_rhs = diag_s(stream1, 1.0f, m);
+    CUDA_CHECK(cudaStreamSynchronize(stream1));  // diag must finish before INV
+
+    float *d_inv = INV_dx<890, size_m>(d_xtx_plus_id, d_inv_rhs);
+    // INV_dx internally sync
+
+    // Step: Wait for XTY (stream3) before dinal math
+    CUDA_CHECK(cudaStreamSynchronize(stream3));
+
+    float *d_weights = XY_s(handle, stream1, d_inv, d_xty, m, 1, m);
+    CUDA_CHECK(cudaStreamSynchronize(stream1));  // ensure weights are ready
+
+    // --- Trashman cleanup shot
+    cudaFree(d_xtx);
+    cudaFree(d_diag_id);
+    cudaFree(d_xty);
+    cudaFree(d_xtx_plus_id);
+    cudaFree(d_inv_rhs);
+    cudaFree(d_inv);
+    cudaFree(d_a);
+    cudaFree(d_b);
+
+    // steam cleanup in main they are owned by main()
+
+    return d_weights;  // caller owns this device pointer
 }
 
 
@@ -705,66 +708,72 @@ void test_xy(){
 
 
 
+
 int main(void)
 {
-    //occasionally r2 score is low, check for racey stuff we can debug
-    
-    //test_xy();
-    // Error code to check return values for CUDA calls
-    const int n = 1 <<6; // dosent work for not nice cases // n cannot be greater than m
-    const int m = 1 <<6;
+    const int n = 1 << 6;  // 64
+    const int m = 1 << 6;  // 64
 
-    constexpr int N =  n;
-    constexpr int M =  m;
+    constexpr int N = n;
+    constexpr int M = m;
+
+    float matrix_A[n][m] = {};
+    float matrix_B[n] = {};
+
+    
+    // Create cuBLAS handle ONCE (saves ~100ms per call)
     cublasHandle_t handle;
     cublasCreate(&handle);
-    float matrix_A [n][m] ={};
-    float matrix_B [n]= {};
-    for( int j=0; j<20; j++){
-                    auto start = std::chrono::steady_clock::now();
 
-    for( int i=0; i<100; i++){
-    //auto rand_start = std::chrono::steady_clock::now();
-    rand_arr<N,M>(matrix_A,n,m);
-    rand_vec<N>(matrix_B,n);
-    //auto rand_end = std::chrono::steady_clock::now();
-
-    //start += std::chrono::duration_cast<std::chrono::milliseconds>(rand_end - rand_start);
-
-
-    float  *h_weights = nullptr;    
     
-    h_weights = ridge_reg<N,M>(matrix_A,matrix_B,n,m,0.0001,handle);
-
-    //print_cuda_vec(h_weights,M);
-    //printf("\n\n\n");
-    float * mat = XY(matrix_host_to_cuda<N,M>(matrix_A,n,m),h_weights,n,1,m,handle);
-    float * matrix_C = vec_cuda_to_dev(mat,n); 
-    // this is getting our y hat
-    //this gives me different answers at times, idk why 
-    //printf("\n\n\n");
-    //printf("\n");
-    //print_vec(matrix_B,M);
-    //printf("q\n");
-    //print_vec(matrix_C,M);
-    if (r2_score(matrix_B,matrix_C,n,0.0001)<0.2){
-        //printf("F ");
+    // Create 3 CUDA streams ONCE (saves stream create/destroy per iteration)
+    cudaStream_t streams[3];
+    for (int i = 0; i < 3; i++) {
+        cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
     }
-    //printf("%f, ", r2_score(matrix_B,matrix_C,n,0.0001));
-    //printf("r2 score %f\n",  r2_score(matrix_B,matrix_C,n,0.0001));
-    //print_vec(matrix_C,n);
 
-    // 3. Calculate the difference (duration)
+   
+    for (int j = 0; j < 20; j++) {
+        auto start = std::chrono::steady_clock::now();
 
-    }
+        for (int i = 0; i < 100; i++) {
+            rand_arr<N, M>(matrix_A, n, m);
+            rand_vec<N>(matrix_B, n);
+
+            float *d_weights = ridge_reg<N, M>(matrix_A, matrix_B, n, m, 0.0001f,
+                                                handle, streams);
+
+            float *d_X = matrix_host_to_cuda<N, M>(matrix_A, n, m);
+            float *d_yhat = XY_s(handle, streams[0], d_X, d_weights, n, 1, m);
+            CUDA_CHECK(cudaStreamSynchronize(streams[0]));
+
+            // Copy y_hat to host for r2_score
+            float *matrix_C = vec_cuda_to_dev(d_yhat, n);
+
+            float r2 = r2_score(matrix_B, matrix_C, n, 0.0001f);
+            if (r2 < 0.2) {
+                printf("F ");
+            }
+
+            // Free up stuff 
+            cudaFree(d_weights);
+            cudaFree(d_X);
+            cudaFree(d_yhat);
+            free(matrix_C);
+        }
+
         auto end = std::chrono::steady_clock::now();
-    
-    std::chrono::duration<double, std::milli> elapsed = end - start;
-    printf( "%lf\n", elapsed.count() );}
+        std::chrono::duration<double, std::milli> elapsed = end - start;
+        printf("%lf\n", elapsed.count());
+    }
+
+    // TrashMan cometh — destroy handle and streams ONCE at exit
+    for (int i = 0; i < 3; i++) {
+        cudaStreamDestroy(streams[i]);
+    }
     cublasDestroy(handle);
+
     cudaDeviceReset();
     printf("Done\n");
     return 0;
 }
-
-
