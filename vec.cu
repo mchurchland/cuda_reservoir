@@ -18,8 +18,8 @@
 #include <vector>
 #include <typeinfo>
 #include <chrono>
-#define THR_PER_BLK 64
-#define BLK_IN_GRID 64
+#define THR_PER_BLK 128
+#define BLK_IN_GRID 128
 /**
 cublas does column major order
 conda activate cuda13
@@ -145,18 +145,15 @@ void set_vec_val(float * h_a,int n,float val){
             h_a[i]= val;
     }
 }
-float *XTY(float * X, float * Y,int m, int n,int k ){
+float *XTY(float * X, float * Y,int m, int n,int k,cublasHandle_t handle ){
     const float alpha = 1.0f;
     const float beta  = 0.0f;
     size_t bytes        = m*n * sizeof(float);
     float  *d_c;
 
     cudaMalloc(&d_c, bytes);
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, m, n ,k, &alpha, X, k, Y,k ,&beta, d_c, m);
 
-    cublasDestroy(handle);
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, m, n ,k, &alpha, X, k, Y,k ,&beta, d_c, m);
 
     return d_c;
 }
@@ -196,13 +193,16 @@ __global__ __launch_bounds__(NT) void inv_kernel(float* A, unsigned lda, float* 
     //// store solution back to global memory
     __syncthreads();
     cusolverdx::copy_2d<NT, N, N, cusolverdx::arrangement::col_major>(Bs, N, x, N); // 1d solve
+    //if (*info !=0){printf("%d %f\n", * info,A[4095]);
+   // }
+    
 }
 template<int Arch,unsigned int unsigned_n>
 float * INV_dx(float * d_A,float * d_B) {
     
     using namespace cusolverdx;
     using Solver = decltype(Size<unsigned_n, unsigned_n>() + Precision<float>() + Type<type::real>() + Function<posv>() + LeadingDimension<unsigned_n>() + SM<Arch>() +
-                            BlockDim<256>() + FillMode<fill_mode::upper>() + Block());
+                            BlockDim<BLK_IN_GRID>() + FillMode<fill_mode::lower>() + Block());
 
     using data_type      = typename Solver::a_data_type;
     using cuda_data_type = typename Solver::a_cuda_data_type;
@@ -225,6 +225,7 @@ float * INV_dx(float * d_A,float * d_B) {
     (cudaMalloc(&d_info, sizeof(int)));
     cudaMalloc(&out, n*m*sizeof(float));
     constexpr unsigned ne_required_smem = ((m + n) * (n + 1) + n) * sizeof(data_type); // this might be able to be adjusted
+
         size_t bytes = n*m * sizeof(float);
 
     //Invokes kernel
@@ -239,7 +240,7 @@ float * INV_dx(float * d_A,float * d_B) {
 
     cudaGetLastError();
     const auto run_ne_d_impl = [&](cudaStream_t str) {
-        ne_kernel<<<BLK_IN_GRID, THR_PER_BLK, ne_required_smem, str>>>(d_A,unsigned_n,d_B,out,d_info);
+        ne_kernel<<<1, THR_PER_BLK, ne_required_smem, str>>>(d_A,unsigned_n,d_B,out,d_info);
     };
     
     run_ne_d_impl(stream);
@@ -275,23 +276,19 @@ CUDA_CHECK(cudaDeviceSynchronize());   // catches runtime/device-side errors
     return out;
 }
 
-float *XY(float * X, float * Y,int m, int n,int k ){
+float *XY(float * X, float * Y,int m, int n,int k,cublasHandle_t handle  ){
     const float alpha = 1.0f;
     const float beta  = 0.0f;
     size_t bytes        = m*n * sizeof(float);
     float  *d_c;
     cudaMalloc(&d_c, bytes);
-    cublasHandle_t handle;
-    cublasCreate(&handle);
     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m,n,k, &alpha, X, m, Y,k ,&beta, d_c, m);
     
-    cublasDestroy(handle);
-
     return d_c;
 }
 
 
-float *XPY(float * X, float * Y,int m, int n){
+float *XPY(float * X, float * Y,int m, int n,cublasHandle_t handle ){
     // this is assuming x and y are square and the same size
     const float alpha = 1.0f;
     const float beta  = 1.0f;
@@ -299,10 +296,7 @@ float *XPY(float * X, float * Y,int m, int n){
     float  *d_c;
 
     cudaMalloc(&d_c, bytes);
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-    cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, &alpha, X, n, &beta, Y, n, d_c, n);
-    cublasDestroy(handle);
+    cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, &alpha, X, m, &beta, Y, n, d_c, n);
     return d_c;
 }
 
@@ -417,7 +411,7 @@ float * XINV(float * d_A, int n){ // somehow these get really big sometimes this
 
 
 template <unsigned int size_n, unsigned int size_m>
-float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha){
+float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha,cublasHandle_t handle ){
     //assuming that Y is a vector maybe I want to add a case for this
     size_t bytes        = n*m * sizeof(float);
     size_t vec_bytes        = n * sizeof(float);
@@ -452,15 +446,15 @@ float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha){
     
 
 
-    std::future<float *> para_xtx = std::async(std::launch::async, XTY, d_a,d_a,m,m,n);  //do these in parallel
+    std::future<float *> para_xtx = std::async(std::launch::async, XTY, d_a,d_a,m,m,n,handle);  //do these in parallel
         h_xtx = para_xtx.get();  // this is working
 
     std::future<float *> para_id = std::async(std::launch::async, diag, alpha,m); 
         float * id = para_id.get(); // these are all kept on device
-    std::future<float *> para_xty = std::async(std::launch::async, XTY, d_a,d_b,m,1,n); // x has dim nxm
+    std::future<float *> para_xty = std::async(std::launch::async, XTY, d_a,d_b,m,1,n,handle); // x has dim nxm
         h_xty = para_xty.get(); // this is working
 
-    h_xtxpLAMID = XPY(h_xtx,id,m,m);  // this is working
+    h_xtxpLAMID = XPY(h_xtx,id,m,m,handle);  // this is working
     //print_cuda(h_xtxpLAMID,m,m);
 
     h_xtx_p_LAMID_INV = INV_dx<890,size_m>(h_xtxpLAMID,diag(1,m));
@@ -472,7 +466,7 @@ float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha){
     
     //print_cuda(h_xtx_p_LAMID_INV,m,m);
     //print_cuda(XY(h_xtx,h_xtx_p_LAMID_INV,m,m,m),m,m);
-    h_weights = XY(h_xtx_p_LAMID_INV,h_xty,m,1,m); //thios is a vector // x has dim mxm the xy is working
+    h_weights = XY(h_xtx_p_LAMID_INV,h_xty,m,1,m,handle); //thios is a vector // x has dim mxm the xy is working
     //print_cuda_vec(h_weights,m);
 
     cudaFree(h_xtx);
@@ -701,7 +695,7 @@ void test_xy(){
     float matrix_B [2][1] ={{1.2},{1.77}};
     //print_cuda(matrix_host_to_cuda<M,N>(matrix_A,m,n),m,n);
     //print_cuda(matrix_host_to_cuda<M,L>(matrix_B,m,l),m,l);
-    float * mat = XY(matrix_host_to_cuda<M,N>(matrix_A,m,n),matrix_host_to_cuda<M,L>(matrix_B,m,l),2,1,2);
+    //float * mat = XY(matrix_host_to_cuda<M,N>(matrix_A,m,n),matrix_host_to_cuda<M,L>(matrix_B,m,l),2,1,2);
     //print_cuda_vec(mat,m);
 }
 
@@ -718,7 +712,8 @@ int main(void)
 
     constexpr int N =  n;
     constexpr int M =  m;
-
+    cublasHandle_t handle;
+    cublasCreate(&handle);
     float matrix_A [n][m] ={};
     float matrix_B [n]= {};
     for( int j=0; j<20; j++){
@@ -735,11 +730,11 @@ int main(void)
 
     float  *h_weights = nullptr;    
     
-    h_weights = ridge_reg<N,M>(matrix_A,matrix_B,n,m,0.0001);
+    h_weights = ridge_reg<N,M>(matrix_A,matrix_B,n,m,0.0001,handle);
 
     //print_cuda_vec(h_weights,M);
     //printf("\n\n\n");
-    float * mat = XY(matrix_host_to_cuda<N,M>(matrix_A,n,m),h_weights,n,1,m);
+    float * mat = XY(matrix_host_to_cuda<N,M>(matrix_A,n,m),h_weights,n,1,m,handle);
     float * matrix_C = vec_cuda_to_dev(mat,n); 
     // this is getting our y hat
     //this gives me different answers at times, idk why 
@@ -762,6 +757,7 @@ int main(void)
     
     std::chrono::duration<double, std::milli> elapsed = end - start;
     printf( "%lf\n", elapsed.count() );}
+    cublasDestroy(handle);
     cudaDeviceReset();
     printf("Done\n");
     return 0;
