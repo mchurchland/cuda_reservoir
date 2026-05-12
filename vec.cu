@@ -55,7 +55,6 @@ void print_cuda(float * h_c,int n,int m){
     print_arr(out,n,m);
 }
 
-
 void print_cuda_vec(float * d_c,int n){
     size_t bytes = n * sizeof(float);
     
@@ -124,8 +123,7 @@ void rand_vec(float arr[size_n],int n){
     // with 1,100 the floats get super large (about 2/100 times) in xtx and thus lead to problems
     // it turns out that Floats are generally only reliable to 6-7 significant decimal digits. and thus here occasionally break when the numbers in the matrix are large
     // having an even distribution changes this as the negative numbers "dampen" the amplification during xtx
-    // I want to make it clear that this does consitute as AI use even though its the search engine, and If this bothers you in anyway please change it back to 1,100 and
-    // I would not have found these errors without the help of the search ai
+    // google’s built-in AI summary helped me here
     for (int i = 0; i < n; i++) {
             arr[i] = dis(gen);
             //printf("%f ",arr[i]);
@@ -592,7 +590,7 @@ float sum(float * Y,int n,int blk_in_grid){ // y needs to be a cuda vector this 
     //float * arr = vec_cuda_to_dev(Y,n);
 
     //float sum = std::accumulate(arr, arr + n, 0.0f);// can be removed after testing
-    reduce6<THR_PER_BLK><<< BLK_IN_GRID, THR_PER_BLK >>>(Y, d_out,n); // fucked up on floats
+    reduce6<THR_PER_BLK><<< BLK_IN_GRID, THR_PER_BLK >>>(Y, d_out,n); // messed up on floats
     float * h_out =(float *)malloc(vec_bytes);
     cudaMemcpy(h_out, d_out, vec_bytes, cudaMemcpyDeviceToHost);
     cudaFree(d_out);
@@ -721,12 +719,12 @@ int main(void)
     float matrix_B[n] = {};
 
     
-    // Create cuBLAS handle ONCE (saves ~100ms per call)
+    // Create cuBLAS handle ONCE 
     cublasHandle_t handle;
     cublasCreate(&handle);
 
     
-    // Create 3 CUDA streams ONCE (saves stream create/destroy per iteration)
+    // Create 3 CUDA streams 
     cudaStream_t streams[3];
     for (int i = 0; i < 3; i++) {
         cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
@@ -767,7 +765,6 @@ int main(void)
         printf("%lf\n", elapsed.count());
     }
 
-    // TrashMan cometh — destroy handle and streams ONCE at exit
     for (int i = 0; i < 3; i++) {
         cudaStreamDestroy(streams[i]);
     }

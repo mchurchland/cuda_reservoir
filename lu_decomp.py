@@ -66,6 +66,8 @@ def solve_block_2x2(A): ## this is for 2x2
   ##     c/a 1]
   ## U = [a    b
   ##      0    d-(c/a)b]
+  ## tell jim  what it would be like for 4x4 
+  ## how it would be in a warp
   assert A.size ==4
   L = np.zeros((2,2)) ## allocations in parallel
   U = np.zeros((2,2))
