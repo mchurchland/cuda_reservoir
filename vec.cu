@@ -106,7 +106,7 @@ template < int size_n, int size_m>
 void rand_arr(float arr[size_n][size_m],int n,int m){
     std::random_device rd;  // Seed
     std::mt19937 gen(rd()); // Generator
-    std::uniform_int_distribution<> dis(1, 100); // Range [1, 100]
+    std::uniform_int_distribution<> dis(-100, 100); // Range [1, 100] doing 1,100 is problematic and leads to solves not working
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
             arr[i][j] = dis(gen);
@@ -119,7 +119,11 @@ template < int size_n>
 void rand_vec(float arr[size_n],int n){
     std::random_device rd;  // Seed
     std::mt19937 gen(rd()); // Generator
-    std::uniform_int_distribution<> dis(1, 100); // Range [1, 100]
+    std::uniform_int_distribution<> dis(-100, 100); // Range [1, 100] doing 1,100 is problematic and leads to solves not working, a google search about
+    // the probability of a 1,100 sampled matrix lead me to this, it helped me realize that the problem is not the distirubtion but the **amplification**
+    // with 1,100 the floats get super large (about 2/100 times) in xtx and thus lead to problems
+    // it turns out that Floats are generally only reliable to 6-7 significant decimal digits. and thus here occasionally break when the numbers in the matrix are large
+    // having an even distribution changes this as the negative numbers "dampen" the amplification during xtx
     for (int i = 0; i < n; i++) {
             arr[i] = dis(gen);
             //printf("%f ",arr[i]);
@@ -744,7 +748,7 @@ int main(void)
     //printf("q\n");
     //print_vec(matrix_C,M);
     if (r2_score(matrix_B,matrix_C,n,0.0001)<0.2){
-        printf("F ");
+        //printf("F ");
     }
     //printf("%f, ", r2_score(matrix_B,matrix_C,n,0.0001));
     //printf("r2 score %f\n",  r2_score(matrix_B,matrix_C,n,0.0001));

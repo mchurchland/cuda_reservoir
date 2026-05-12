@@ -1,4 +1,4 @@
-Intro:
+Introduction:
 My final project proposition proposed to implement memory capacity, a task agnostic performance metric used in my thesis, in CUDA. This proved to be challenging due to the constraints and challenge of writing code in CUDA. I managed to implement a large portion of this measure, though the array slicing and summing over all delays was not included. I invested my time into deeply investigating and developing low level implementations of the underlying matrix functions. This deviation translated this project from a simple CUDA port to an investigation into the backbone methods supporting matrix solving on GPUs.   
 
 First I developed:
@@ -293,4 +293,14 @@ My final project changed forms many times throughout the process of completing i
 
 #### Future Directions/Limitations:
 
-The biggest limitation in this project is the occasional failing of 
+The biggest limitation in this project is the occasional failing (2/100 solves) of my CUDA solvers. I attempted to fix this bug in numerous ways though vigorous checking of the shared memory to converting parts of the ridge regression to be sequential instead of in parallel. I suspect that floating point imprecision from the xTx is the cause. I would love if we could figure this out together.
+
+The other limitation in this project was the lack of slicing used in memory capacity.
+
+MC is defined by Jaeger as 
+
+$$\sum_{D=0}^{\inf}=MC_D$$
+My code computes
+$MC_{D=0}$ which is not the full memory capacity. I would need to slice the array and sum over all delays to accomplish this. I would like to implement this in the future
+
+Finally, I would like to have implemented my LU factorization on CUDA but this seems quite daunting. My implementation in Python does not make use of the potential parallelization that could be gained. I would also like to re-implement this code to work for multiple block sizes not just blocksize 2. 
