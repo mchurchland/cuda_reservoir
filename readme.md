@@ -151,7 +151,7 @@ The benchmark I ran consists of 100 random 6x6 float solves with time averaged o
 
 
 There are three interesting results to observe from the benchmark run.
-1. regardless of the THR_PER_BLK and BLK_SIZ, mean time stays remarkably consistent
+1. Regardless of the THR_PER_BLK and BLK_SIZE, mean time stays remarkably consistent
 	1. This suggests that the majority of run time is dominated by kernel launch / memory copying overhead, as its clear that allocating more computational resources does not impact the average speed of 100 solves
 2. The parallelized torch based Python script runs ~$3x$ slower than the CUDA script
 	1. This is due to overhead from calling kernels in python
@@ -180,7 +180,7 @@ LU decomposition is the process to decomposing a matrix A into two parts: a lowe
 Once a matrix is in LU form then solving is easy as one only would need to do back substitution.
 [source](https://www.cs.utexas.edu/~flame/laff/alaff/chapter05-launch.html)
 To do unblocked LU decomposition you do this
-![[Pasted image 20260510140110.png]]
+![](110.png)
 
 To do the blocked update our $a_{11}$ is no longer a scalar but rather a blocksize X blocksize matrix
 
@@ -201,7 +201,8 @@ ${A_{00}}\space{a_{01}}\space{A_{02}}\space{a_{10}^T}\space{\alpha_{11}}\space{a
 
 
 Furthermore we must do a more complicated update because $a_{11}$ is no longer a scalar in the blocked version.
-![[Pasted image 20260510141125.png]]
+
+![](125.png)
 
 Here is an example for how the matrix is broken up for 
 n=6
@@ -220,7 +221,7 @@ pivot = 2
 Thus we use the Schur complement to update $A_{22}$
 
 We follow these steps seen [here](https://www.cs.cornell.edu/~bindel/class/cs6210-f12/notes/lec09.pdf)
-![[Pasted image 20260510141403.png]]
+![](403.png)
 
 First we solve and update $A_{11}$ by doing a simple 2x2 solve (seen in solve_block_2x2)
 This gives us both $L_{11},U_{11}$
@@ -286,6 +287,10 @@ This code has lots of opportunities for parallelism and I have commented in the 
 I should note that this code allows one to solve matrices while not loading the whole matrix into shared memory. The amount of shared memory used by this program scales super linearly with blocksize. And (except for $A_{22}$, also depends on how matrix multiplication is implemented) linearly with matrix size. The only parts of the matrix needed in shared memory are $A_{11},A_{22},A_{21},A_{12}$ and $L_{21},U_{12}$. The size of these matrices is mainly controlled by the block size. Furthermore, if the matrix is so big that one or all of these cannot fit into shared memory each of the steps can be batched so that only a smaller portion of the matrix is in shared memory. 
 
 ___
-Conclusion:
+#### Conclusion:
 
 My final project changed forms many times throughout the process of completing it. I underestimated the challenge of implementing "simple" matrix operations in a parallelized fashion in CUDA. I now understand how LU decomposition and by proxy parallelized matrix solves work. I also understand the challenge and also reward of implementing existing methods in CUDA.  
+
+#### Future Directions/Limitations:
+
+The biggest limitation in this project is the occasional failing of 

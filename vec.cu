@@ -243,6 +243,7 @@ float * INV_dx(float * d_A,float * d_B) {
     };
     
     run_ne_d_impl(stream);
+
     //print_cuda(out,m,n);
     //printf("dead?");
         //cudaError_t err = cudaGetLastError();
@@ -269,6 +270,7 @@ CUDA_CHECK(cudaDeviceSynchronize());   // catches runtime/device-side errors
     // cuSolver reference
     //=========================
     // Use dumb B as only factorization is performed
+    cudaStreamDestroy(stream);
     (cudaFree(d_info));
     return out;
 }
@@ -293,7 +295,7 @@ float *XPY(float * X, float * Y,int m, int n){
     // this is assuming x and y are square and the same size
     const float alpha = 1.0f;
     const float beta  = 1.0f;
-    size_t bytes        = n*n * sizeof(float);
+    size_t bytes        = n*m * sizeof(float);
     float  *d_c;
 
     cudaMalloc(&d_c, bytes);
@@ -451,15 +453,15 @@ float * ridge_reg(float  X [size_n][size_m], float * Y,int n,int m,float alpha){
 
 
     std::future<float *> para_xtx = std::async(std::launch::async, XTY, d_a,d_a,m,m,n);  //do these in parallel
-    std::future<float *> para_id = std::async(std::launch::async, diag, alpha,m); 
-    std::future<float *> para_xty = std::async(std::launch::async, XTY, d_a,d_b,m,1,n); // x has dim nxm
+        h_xtx = para_xtx.get();  // this is working
 
-    float * id = para_id.get(); // these are all kept on device
-    h_xtx = para_xtx.get();  // this is working
-    
+    std::future<float *> para_id = std::async(std::launch::async, diag, alpha,m); 
+        float * id = para_id.get(); // these are all kept on device
+    std::future<float *> para_xty = std::async(std::launch::async, XTY, d_a,d_b,m,1,n); // x has dim nxm
+        h_xty = para_xty.get(); // this is working
+
     h_xtxpLAMID = XPY(h_xtx,id,m,m);  // this is working
     //print_cuda(h_xtxpLAMID,m,m);
-    h_xty = para_xty.get(); // this is working
 
     h_xtx_p_LAMID_INV = INV_dx<890,size_m>(h_xtxpLAMID,diag(1,m));
     //h_xtx_p_LAMID_INV = XINV(h_xtxpLAMID,m); // this is working
@@ -586,7 +588,7 @@ float sum(float * Y,int n,int blk_in_grid){ // y needs to be a cuda vector this 
     float *d_out = nullptr;
     cudaMalloc(&d_out, vec_bytes);
 
-    float * arr = vec_cuda_to_dev(Y,n);
+    //float * arr = vec_cuda_to_dev(Y,n);
 
     //float sum = std::accumulate(arr, arr + n, 0.0f);// can be removed after testing
     reduce6<THR_PER_BLK><<< BLK_IN_GRID, THR_PER_BLK >>>(Y, d_out,n); // fucked up on floats
@@ -655,10 +657,10 @@ float r2_score(float * Y, float * Y_hat, int n,float alpha){
     size_t vec_bytes        = n * sizeof(float);
 	int blk_in_grid = ceil( float(n) / THR_PER_BLK );
     //need to accutally free memory here im being a bad bad boy
-    float * yt = (float *)malloc(vec_bytes);
-    float * yh = (float *)malloc(vec_bytes);
-    float * yt_sq = (float *)malloc(vec_bytes);
-    float * yh_sq = (float *)malloc(vec_bytes);
+    float * yt = nullptr;
+    float * yh = nullptr;
+    float * yt_sq = nullptr;
+    float * yh_sq = nullptr;
     
     //these could be done in parallel with careful gpu shared memory allocation, sum breaks if they are done in parallel rn
     std::future<float *> Y_tru = std::async(std::launch::async, dif, Y,n,blk_in_grid,false); 
@@ -747,7 +749,7 @@ int main(void)
     //printf("q\n");
     //print_vec(matrix_C,M);
     if (r2_score(matrix_B,matrix_C,n,0.0001)<0.2){
-        //printf("F ");
+        printf("F ");
     }
     //printf("%f, ", r2_score(matrix_B,matrix_C,n,0.0001));
     //printf("r2 score %f\n",  r2_score(matrix_B,matrix_C,n,0.0001));
