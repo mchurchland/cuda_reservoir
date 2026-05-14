@@ -118,12 +118,14 @@ template < int size_n>
 void rand_vec(float arr[size_n],int n){
     std::random_device rd;  // Seed
     std::mt19937 gen(rd()); // Generator
-    std::uniform_int_distribution<> dis(-100, 100); // Range [1, 100] doing 1,100 is problematic and leads to solves not working, a google search about
-    // the probability of a 1,100 sampled matrix lead me to this, it helped me realize that the problem is not the distirubtion but the **amplification**
+    std::uniform_int_distribution<> dis(-100, 100); // Range [1, 100] doing 1,100 is problematic and leads to solves not working, google’s built-in AI summary helped me here 
+    // with a search about
+    // the probability of a 1,100 sampled matrix bieng degenerate
+    // it helped me realize that the problem is not the matrix occasionally not having full rank but the **amplification** of floating point numbers
     // with 1,100 the floats get super large (about 2/100 times) in xtx and thus lead to problems
     // it turns out that Floats are generally only reliable to 6-7 significant decimal digits. and thus here occasionally break when the numbers in the matrix are large
-    // having an even distribution changes this as the negative numbers "dampen" the amplification during xtx
-    // google’s built-in AI summary helped me here
+    // having an distribution centered at 0 changes this as the negative numbers "dampen" the amplification during xtx
+    // 
     for (int i = 0; i < n; i++) {
             arr[i] = dis(gen);
             //printf("%f ",arr[i]);

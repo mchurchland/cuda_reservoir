@@ -148,22 +148,27 @@ ___
 | PY_SEQ |  | 767.53663325       | 1.4775274987909315 |
 
 The benchmark I ran consists of 100 random 6x6 float solves with time averaged over 20 trials.
-
+- The distribution of random numbers matters a lot
+- If the numbers are not mean zero, they can grow or shrink to large magnitudes. Even if they are mean zero they can still shrink or grow to large magnitudes depending on the magnitude of the distribution
+- It is most stable with values being +1-1, for our testing we initially did sampled from [1,100] which lead to occasional errors due to imprecision in large float values (~2/100 runs). We switched it to $\pm100$ which leads to errors in about (~1/400 runs). Google’s built-in AI summary helped me identify the numerical floating point issue with [1,100], but it did not write or modify the code.
 
 There are three interesting results to observe from the benchmark run.
-1. Regardless of the THR_PER_BLK and BLK_SIZE, mean time stays remarkably consistent
+1. regardless of the THR_PER_BLK and BLK_SIZE, mean time stays remarkably consistent
 	1. This suggests that the majority of run time is dominated by kernel launch / memory copying overhead, as its clear that allocating more computational resources does not impact the average speed of 100 solves
-2. The parallelized torch based Python script runs ~$3x$ slower than the CUDA script
+2. The parallelized torch based Python script runs ~$3x$ slower than the non-optimized CUDA script and ~10x slower than the optimized CUDA script
 	1. This is due to overhead from calling kernels in python
 	2. Overhead from autograd, and dispatching
 		1. source: https://discuss.pytorch.org/t/example-where-pytorch-substantially-slower-than-c-cuda/179076/5
-3. The sequential single threaded numpy based Python script runs ~$3x$ slower than the CUDA script, but is actually running at the same speed as the torch based Python script
+3. The Final attempts used streams to do the matrix operations in ridge regression in parallel rather than doing them sequentially.
+	1. Originally, I had done these operations in parallel using CPP's standard concurrency library. This lead to shared memory being overwritten during computations; thus I switched them to sequential and finally switched them to use streams.
+	2. Finally, in this version I stopped recreating and destroying the handles in the functions (such as XY, XTY, XPY) rather I create the handles in main then pass them to CUBLAS and CUSOLVER
+	3. This lead to a ~3.5x speedup over the original CUDA script and a ~10x speedup over the python script
+4. The sequential single threaded numpy based Python script runs ~$3x$ slower than the non-optimized CUDA script and ~10x slower than the optimized CUDA script, but is actually running at the same speed as the torch based Python script
 	1. This suggests that for problems of this size the overhead of kernel launches and memory copies is simply not worth the hassle, unless you are batching the matrix solves.
 
 My final project's main theme is overhead. It is clear that in working with solves on small matrices overhead is often times the largest cost in the computation. For CUDA, the overhead comes in the form of memory copies and kernel launches. For python it inherits these overheads and adds its own in the form of generalization in torch. My CUDA code assumes float values of a particular size. The torch code must handle a variety of datatypes. Its code may also involve more kernel launches or be optimized for larger matrix solves.
 
 Speaking of larger matrices I wanted to investigate how GPU's can be used to solver larger matrices. These experiments elucidated the challenge of using shared memory for large matrix solves so I wanted to further investigate how that was done.
-
 
 ___
 #### Deep Dive, stretch goal

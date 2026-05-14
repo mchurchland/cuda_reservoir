@@ -111,7 +111,7 @@ template < int size_n, int size_m>
 void rand_arr(float arr[size_n][size_m],int n,int m){
     std::random_device rd;  // Seed
     std::mt19937 gen(rd()); // Generator
-    std::uniform_int_distribution<> dis(-100, 100); // Range [1, 100] doing 1,100 is problematic and leads to solves not working
+    std::uniform_int_distribution<> dis(-2, 2); // Range [1, 100] doing 1,100 is problematic and leads to solves not working
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < m; j++) {
             arr[i][j] = dis(gen);
@@ -124,7 +124,7 @@ template < int size_n>
 void rand_vec(float arr[size_n],int n){
     std::random_device rd;  // Seed
     std::mt19937 gen(rd()); // Generator
-    std::uniform_int_distribution<> dis(-100, 100); // Range [1, 100] doing 1,100 is problematic and leads to solves not working, a google search about
+    std::uniform_int_distribution<> dis(-2, 2); // Range [1, 100] doing 1,100 is problematic and leads to solves not working, a google search about
     // the probability of a 1,100 sampled matrix lead me to this, it helped me realize that the problem is not the distirubtion but the **amplification**
     // with 1,100 the floats get super large (about 2/100 times) in xtx and thus lead to problems
     // it turns out that Floats are generally only reliable to 6-7 significant decimal digits. and thus here occasionally break when the numbers in the matrix are large
@@ -192,13 +192,7 @@ float *XY_s(cublasHandle_t handle, cudaStream_t stream,
  * Host main routine
  */
 
-__global__ void sub_val(float *a, float *b, float *c, int n)
-{
-	int id = blockDim.x * blockIdx.x + threadIdx.x;
-	if(id < n){
-        c[id] = a[id] - b[0];
-        }
-}
+
 
 
 
@@ -217,7 +211,7 @@ class View{ //assume that bl is the blk size of the cols, ie we have this many r
             this->n=n_in;
             this->rows = r;
         }
-        float get(int pos){
+        __host__ __device__ float get(int pos){
             if (pos==0){
                 return A[0];
             }else{      
@@ -232,12 +226,144 @@ class View{ //assume that bl is the blk size of the cols, ie we have this many r
                     printf("\n");
                 }
                 printf(" %f ",this->get(i));
-                
-
             }
         }
+        float * get_for_cuda(){
+            
+            int num_vals= (this->rows) * (this->block);
+            float * out = (float *)malloc(num_vals*sizeof(float));
+            for(int i=0; i< num_vals;i++){
+                out[i] = this->get(i);
+            }
+            return out;
+    }
+            
 };
 
+
+__global__ void solve_block_2x2(float * a, float * L,float* U)
+{
+	int id = blockDim.x * blockIdx.x + threadIdx.x;
+	if(id ==0){
+        L[0]= 1;
+    }
+    else if (id ==1)
+    {
+        L[1] = 0;
+    }
+        else if (id ==2)
+    {
+        L[2] = a[2]/a[0];
+    }
+        else if (id ==3)
+    {
+        L[3] = 1;
+    }
+        else if (id ==4)
+    {
+        U[0] = a[0];
+    }
+        else if (id ==5)
+    {
+        U[1] = a[1];
+    }
+        else if (id ==6)
+    {
+        U[2] = 0;
+    }
+        else if (id ==7)
+    {
+        U[3] = a[3]-((a[2]/a[0]*a[2]));
+    }
+}
+
+__global__ void solve_l(float * U_11,float * a_21,float * L,int* bl,int* rows){
+    //ideally a_21 is in shared memory
+
+    int size_l = * rows;
+    int block = * bl;
+    	int id = blockDim.x * blockIdx.x + threadIdx.x;
+        
+    if (id < size_l){
+        
+    if (id %2==0)                { 
+        
+        L[id] = a_21[id]/U_11[0]; //sexy ash
+    } else{
+        printf("\n%d %f\n",id,(a_21[id-1]/U_11[0]));
+        L[id] = (a_21[id]-((a_21[id-1]/U_11[0])*U_11[1]))/U_11[3]; //sexy ash
+    }
+}
+}
+
+
+__global__ void solve_u(float * U_11,float * a_21){
+
+}
+
+
+__global__ void construct_final_lu(float * A, float * L, float * U, int n){    
+	int id = blockDim.x * blockIdx.x + threadIdx.x;
+    if (id <= n*n){
+        int row = id / n;
+        int column = id %n; 
+	if (row == column){
+        L[id] = 1;
+        } else if (row < column){
+        U[id] = A[id];
+    }
+    else{
+        L[id] = A[id];
+    }
+    }
+    }
+typedef struct {
+    float *d_l;
+    float *d_u;
+} PointerPair;
+
+template <int n_s>
+PointerPair solve_block(cudaStream_t stream, View<n_s> a_11,View<n_s> a_21, int n)
+{
+    size_t bytes = 2 * 2 * sizeof(float);
+
+    float *d_a = nullptr;
+    float *d_l = nullptr;
+    float *d_u = nullptr;
+
+    (cudaMalloc(&d_a, bytes));
+    (cudaMalloc(&d_l, bytes));
+    (cudaMalloc(&d_u, bytes));
+    cudaMemcpy(d_a, a_11.get_for_cuda(), bytes, cudaMemcpyHostToDevice);
+    solve_block_2x2<<<BLK_IN_GRID, THR_PER_BLK>>>(d_a,d_l,d_u);
+    cudaFree(d_a);
+    PointerPair pairs;
+    pairs.d_l = d_l;
+    pairs.d_u = d_u;
+    d_a = nullptr;
+    size_t a_21_bytes = (a_21.rows*a_21.block)*sizeof(float);
+    (cudaMalloc(&d_a, a_21_bytes));
+
+    cudaMemcpy(d_a, a_21.get_for_cuda(), a_21_bytes, cudaMemcpyHostToDevice);
+    int * d_block = nullptr;
+    int * d_row = nullptr;
+    float * L = nullptr;
+    cudaMalloc(&L, a_21_bytes);
+    cudaMalloc(&d_block, sizeof(int));
+    cudaMalloc(&d_row, sizeof(int));
+
+   
+    cudaMemcpy(d_block, &a_21.block, sizeof(int),cudaMemcpyHostToDevice);
+    cudaMemcpy(d_row,   &a_21.rows, sizeof(int),cudaMemcpyHostToDevice);
+
+
+    solve_l<<<BLK_IN_GRID, THR_PER_BLK>>>(d_u,d_a,L,d_block,d_row); 
+    print_cuda_vec(d_u,4);
+        print_cuda_vec(d_a,4);
+
+    print_cuda_vec(L,4);
+    return pairs;
+}
 
 template <int n_s>
 void split_matrix(float  A[n_s],int pivot,int blocksize,int n){
@@ -252,6 +378,7 @@ void split_matrix(float  A[n_s],int pivot,int blocksize,int n){
     View<n_s> a_20(A,(pivot*n)+(blocksize*n),pivot,n-(blocksize+pivot),n); // this might be blocksize squared for the general case
     View<n_s> a_12(A,(pivot*n)+(blocksize*2),n-(blocksize+pivot),blocksize,n); // this might be blocksize squared for the general case
     View<n_s> a_21(A,(pivot*n)+(blocksize*n)+blocksize,blocksize,n-(blocksize+pivot),n); // this might be blocksize squared for the general case    
+
 } 
 
 
@@ -272,21 +399,37 @@ int main(void)
     const int n = 1 << 3;  // 64
 
     constexpr int N = n;
+    cudaStream_t streams;
+    cudaStreamCreateWithFlags(&streams, cudaStreamNonBlocking);
 
-    float matrix_B[n] = {};
-    
-   
+    float A[n] = {};
+
     //for (int j = 0; j < 1; j++) {
         auto start = std::chrono::steady_clock::now();
-
         //for (int i = 0; i < 1; i++) {
-            rand_vec<N>(matrix_B, n*n);
-            print_vec(matrix_B,n*n,n);
+            rand_vec<N>(A, n*n);
+            int pivot = 2;
+            int blocksize =2;
+            //print_vec(A,n*n,n);
             //printf("%f ",a.get(0));
             //printf("%f ",a.get(1));
             //printf("%f ",a.get(2));
             //printf("%f ",a.get(3));
-            split_matrix<N>(matrix_B,2,2,n);
+            //split_matrix<N>(matrix_B,2,2,n);
+            View<N> a_00(A,0,pivot,pivot,n);
+            View<N> a_11(A,(pivot*n)+pivot,blocksize,blocksize,n);
+            View<N> a_01(A,pivot,blocksize,pivot,n);
+            View<N> a_10(A,(pivot*n),pivot,blocksize,n);
+            View<N> a_22(A,((pivot*n)+(blocksize*n)+blocksize*2),n-(blocksize+pivot),n-(blocksize+pivot),n); // this might be blocksize squared for the general case
+            //shouldnt this be two columns not 4
+            View<N> a_02(A,pivot+blocksize,n-(blocksize+pivot),pivot,n); 
+            View<N> a_20(A,(pivot*n)+(blocksize*n),pivot,n-(blocksize+pivot),n); // this might be blocksize squared for the general case
+            View<N> a_12(A,(pivot*n)+(blocksize*2),n-(blocksize+pivot),blocksize,n); // this might be blocksize squared for the general case
+            View<N> a_21(A,(pivot*n)+(blocksize*n)+blocksize,blocksize,n-(blocksize+pivot),n); // this might be blocksize squared for the general case    
+            
+
+            solve_block<N>(streams,a_11,a_22,n);
+
             //printf("%f ",a.get(4));
 
             
