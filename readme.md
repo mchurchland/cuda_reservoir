@@ -317,9 +317,8 @@ My final project changed forms many times throughout the process of completing i
 
 #### Future Directions/Limitations:
 
-The biggest limitation in this project is the occasional failing (2/100 solves) of my CUDA solvers. I attempted to fix this bug in numerous ways though vigorous checking of the shared memory to converting parts of the ridge regression to be sequential instead of in parallel. I suspect that floating point imprecision from the xTx is the cause. I would love if we could figure this out together.
 
-The other limitation in this project was the lack of slicing used in memory capacity.
+A limitation in this project was the lack of slicing used in memory capacity.
 
 MC is defined by Jaeger as 
 
