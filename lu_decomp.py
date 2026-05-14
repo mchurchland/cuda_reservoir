@@ -18,21 +18,21 @@ def update_a22(A_22,a_21,a_12_t):
   A_22 -= a_21 @ a_12_t
 
 def hard_update(A_11,A_21,A_12): ## right now this only works for 2x2
-  L_11,U_11 = solve_block_2x2(A_11) ## easy solve
+  L_11,U_11 = solve_block_2x2(A_11) ## easy solve ## done
   ## now we need L_21 
   ##compute X U_11 =  A_21 to solve for L_21
-  L_21 = solve_l(U_11,A_21) ## These can happen concurrently
+  L_21 = solve_l(U_11,A_21) ## These can happen concurrently ## done
 
   ## we need to find U_12
   ## compute L_11 X    = A_12 _t to solve for U_12
   U_12 = solve_u(L_11,A_12) ## These can happen concurrently
   
-  out_A_11 = U_11 ## assuming block size 2
+  out_A_11 = U_11 ## assuming block size 2 ## done
   out_A_11[1][0] = L_11[1,0]
   return L_21,U_12, out_A_11
 
 
-def solve_l(U_11,A_21): ## derived
+def solve_l(U_11,A_21): ## derived ## done
   size_of_L = len(A_21)
   L= np.zeros((size_of_L,2))
   for idx,row in enumerate(A_21): ## each is indep
@@ -41,7 +41,7 @@ def solve_l(U_11,A_21): ## derived
     L[idx][1] = (A_21[idx][1]-(L[idx][0]*U_11[0][1]))/U_11[1][1]
   return L
 
-def solve_u(L_11,A_12): ## derived
+def solve_u(L_11,A_12): ## derived ## done
   size_of_U = len(A_12[0])
   U= np.zeros((2,size_of_U))
   for idx,row in enumerate(A_12[0]): ## each is indep
