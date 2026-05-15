@@ -332,3 +332,7 @@ ___
 ## Bonus:
 
 I implemented the blocked LU decomposition algorithm that I implemented in python in CUDA. It is in ahhhh.cu. It works on 4x4 matrices. It uses View as a "slicing" class to partition the matrices then solves them in solve_block. If I had more time I would make this work on n x n matrices and will do this within the next week. It runs in 100 ms.
+
+__
+## Bonus Bonus:
+I worked with my dad to complete it for n x n matricies doing a 1024 x 1024 matrix in 5 seconds. I think it can be alot faster. This was completed after the due date and was mainly done for fun. The code was not completly written by me for this version so I wouldnt grade me based off of it. The key bug that I missed was putting the L_21 and U_12 in column major order before using them in matrix multiplication, and setting the matrix after matrix multiplication back to row major order. Once this was done, the code worked on n x n.
