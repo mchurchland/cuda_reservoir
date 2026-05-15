@@ -327,3 +327,8 @@ My code computes
 $MC_{D=0}$ which is not the full memory capacity. I would need to slice the array and sum over all delays to accomplish this. I would like to implement this in the future
 
 Finally, I would like to have implemented my LU factorization on CUDA but this seems quite daunting. My implementation in Python does not make use of the potential parallelization that could be gained. I would also like to re-implement this code to work for multiple block sizes not just blocksize 2. 
+
+___
+## Bonus:
+
+I implemented the blocked LU decomposition algorithm that I implemented in python in CUDA. It is in ahhhh.cu. It works on 4x4 matrices. It uses View as a "slicing" class to partition the matrices then solves them in solve_block. If I had more time I would make this work on n x n matrices and will do this within the next week. It runs in 100 ms.

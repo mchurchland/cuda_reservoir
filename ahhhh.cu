@@ -112,6 +112,20 @@ float * set_arr_lin(int n,int m,float * arr){ // check this tmr
     printf("\n");
     return h_a;
 }
+
+float * set_arr_col_to_row(int n, int m, float * arr){ 
+    size_t bytes = (n * m) * sizeof(float);
+    float * h_a = (float *)malloc(bytes);
+    
+    for (int i = 0; i < n * m; i++) {
+  
+        int column = i / n; 
+        int row = i % n;
+        
+        h_a[row * m + column] = arr[i];
+    }
+    return h_a;
+}
 template < int size_n, int size_m>
 float * matrix_host_to_cuda(float h_[size_n][size_m],int n,int m){
     size_t bytes = n*m * sizeof(float);
@@ -182,7 +196,7 @@ float *XPY_s(cublasHandle_t handle, cudaStream_t stream,
     (cudaMalloc(&d_c, bytes));
 
     cublasSetStream(handle, stream);
-    cublasSgeam(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+    cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                 m, n, &alpha, X, m, &beta, Y, m, d_c, m);
     return d_c;
 }
@@ -272,6 +286,24 @@ class View{ //assume that bl is the blk size of the cols, ie we have this many r
                 this->set_val(vals[i], i);
             } 
         }
+        void set_t(float * vals){
+            int R = this->rows;
+            int C = this->block; // Assuming block is columns
+            int num_vals = R * C;
+
+            for(int i = 0; i < num_vals; i++){
+                // 1. Get original row/col
+                int r = i / C;
+                int c = i % C;
+
+                // 2. Transposed index formula: (new_row * new_cols) + new_col
+                // New row is old col, new col is old row
+                int transposed_i = (c * R) + r;
+
+                // 3. Set with transposed index
+                this->set_val(vals[i], transposed_i);
+            } 
+        }
         void set_from_cuda(float * vals){
             int num_vals= (this->rows) * (this->block);
             size_t bytes = num_vals * sizeof(float);
@@ -279,6 +311,14 @@ class View{ //assume that bl is the blk size of the cols, ie we have this many r
             cudaMemcpy(out, vals, bytes, cudaMemcpyDeviceToHost);
             this->set(out);
         }
+        void set_from_cuda_t(float * vals){
+            int num_vals= (this->rows) * (this->block);
+            size_t bytes = num_vals * sizeof(float);
+            float * out =(float *)malloc(bytes);
+            cudaMemcpy(out, vals, bytes, cudaMemcpyDeviceToHost);
+            this->set_t(out);
+        }
+
         void set_val(float val,int pos){
             int block_index = pos / this->block;
             int offset_in_block = pos % this->block;
@@ -330,7 +370,7 @@ __global__ void solve_block_2x2(float * a, float * L,float* U)
     }
         else if (id ==7)
     {
-        U[3] = a[3]-((a[2]/a[0]*a[2]));
+        U[3] = a[3]-((a[2]/a[0])*a[1]);
     }
 }
 
@@ -369,7 +409,7 @@ __global__ void solve_u(float * U,float * a_12, float * L_11,int* bl,int* rows){
         //seond row updated
         //+bl to go to row 2
         
-        U[id] = (a_12[id]-((a_12[id-block/2]*L_11[2])));
+        U[id] = (a_12[id]-((a_12[id-block]*L_11[2])));
     }
 }
 }
@@ -379,7 +419,7 @@ __global__ void solve_u(float * U,float * a_12, float * L_11,int* bl,int* rows){
 
 __global__ void construct_final_lu(float * A, float * L, float * U, int n){    
 	int id = blockDim.x * blockIdx.x + threadIdx.x;
-    if (id <= n*n){
+    if (id < n*n){
         int row = id / n;
         int column = id %n; 
         
@@ -388,9 +428,11 @@ __global__ void construct_final_lu(float * A, float * L, float * U, int n){
         U[id] = A[id];
         } else if (row < column){
         U[id] = A[id];
+        L[id] =0 ;
     }
     else{
         L[id] = A[id];
+        U[id] =0 ;
     }
     }
     }
@@ -408,8 +450,20 @@ void solve_block(View<n_s> a_11,View<n_s> a_21,View<n_s> a_12, View<n_s> a_22, i
     (cudaMalloc(&d_l, bytes));
     (cudaMalloc(&d_u, bytes));
     cudaMemcpy(d_a, a_11.get_for_cuda(), bytes, cudaMemcpyHostToDevice);
+    
     solve_block_2x2<<<BLK_IN_GRID, THR_PER_BLK>>>(d_a,d_l,d_u);
     cudaFree(d_a);
+
+    //print_cuda_vec(d_l,4);
+    //print_cuda_vec(U,6);
+    //print_cuda_vec(d_a_12,6);
+    
+    a_11.set_from_cuda(d_u);
+    
+    a_11.set_val(vec_cuda_to_dev(d_l,4)[2],2);
+    
+    if (a_21.rows*a_21.block>0){
+
     d_a = nullptr;
     size_t a_21_bytes = (a_21.rows*a_21.block)*sizeof(float);
     (cudaMalloc(&d_a, a_21_bytes));
@@ -431,11 +485,17 @@ void solve_block(View<n_s> a_11,View<n_s> a_21,View<n_s> a_12, View<n_s> a_22, i
 
 
     solve_l<<<BLK_IN_GRID, THR_PER_BLK>>>(d_u,d_a,L,d_block,d_row); 
+    //printf("\n space \n");
     //print_cuda_vec(L,4);
+    //printf("\n  \n");
     //print_cuda_vec(d_u,4);
+    //printf("\n  \n");
     //print_cuda_vec(d_a,4);
+    //printf("2\n");
     
 
+    //printf("2\n");
+    //print_vec(a_21.get_for_cuda(),4);
 
 
    // __global__ void solve_u(float * U,float * a_12, float * L_11,int* bl,int* rows){
@@ -445,18 +505,11 @@ void solve_block(View<n_s> a_11,View<n_s> a_21,View<n_s> a_12, View<n_s> a_22, i
 
     cudaMemcpy(d_a_12, a_12.get_for_cuda(), a_12_bytes, cudaMemcpyHostToDevice);
     solve_u<<<BLK_IN_GRID, THR_PER_BLK>>>(U,d_a_12,d_l,d_block,d_row); 
-    //print_cuda_vec(d_l,4);
-    //print_cuda_vec(U,6);
-    //print_cuda_vec(d_a_12,6);
+
+
+    a_21.set_from_cuda(L); //u_21
     
-    a_11.set_from_cuda(d_u);
-    
-    a_11.set_val(vec_cuda_to_dev(d_l,4)[2],2);
-    
-    if (a_21.rows*a_21.block>0){
-    a_21.set_from_cuda(U); //u_21
-    
-    a_12.set_from_cuda(L);
+    a_12.set_from_cuda(U);
     //printf("\n");
     //a_21.print();
     //a_12.print();
@@ -475,8 +528,8 @@ void solve_block(View<n_s> a_11,View<n_s> a_21,View<n_s> a_12, View<n_s> a_22, i
 
 
 
-    float * xy = XY_s(handle,stream,col_12_cuda,col_21_cuda,a_12.rows,a_21.block,a_12.block); // second row 
-
+    float * xy = XY_s(handle,stream,col_21_cuda,col_12_cuda,a_12.rows,a_21.block,a_12.block); // second row 
+    //print_cuda(xy,a_22.rows,a_22.rows);
 
 
     //update a_22
@@ -484,15 +537,18 @@ void solve_block(View<n_s> a_11,View<n_s> a_21,View<n_s> a_12, View<n_s> a_22, i
     float * d_a_22 = nullptr;
     size_t a_22_bytes = (a_22.rows*a_22.block)*sizeof(float);
     (cudaMalloc(&d_a_22, a_22_bytes));
-
+    
     cudaMemcpy(d_a_22, a_22.get_for_cuda(), a_22_bytes, cudaMemcpyHostToDevice);
 
     float * xpy = XPY_s(handle,stream,d_a_22,xy,a_22.rows,a_22.block);
 
+
+    float * h_xpy = vec_cuda_to_dev(xpy,a_22.rows*a_22.block);
+
+
+    a_22.set_from_cuda_t(xpy); // I think i need to like switch to column major order here not just transpose
     //print_cuda(xpy,a_22.rows,a_22.rows);
-    //printf("\n");
-    a_22.set_from_cuda(xpy);
-    //print_cuda(xpy,a_22.rows,a_22.rows);
+    //a_22.print();
     }
 }
 
@@ -528,11 +584,11 @@ int main(void)
     //https://lemesurierb.people.charleston.edu/numerical-methods-and-analysis-python/main/linear-equations-3-lu-factorization-python.html
 
     //this is it for 4x4
-    const int n = 1 << 3;  // 64
+    const int n = 1 << 2;  // 64
 
-    constexpr int N = n;
+    constexpr int N = n*n;
 
-    float A[n] = {};
+    float A[N] = {};
 
     //for (int j = 0; j < 1; j++) {
         auto start = std::chrono::steady_clock::now();
@@ -543,16 +599,16 @@ int main(void)
     cublasHandle_t handle;
     cublasCreate(&handle);
 
-            
-            for (int pivot =0; pivot<N;pivot+=2){
-                int blocksize =2;
+            int blocksize =2;
+            for (int pivot =0; pivot<n;pivot+=2){
+                
             print_vec(A,n*n,n);
             //printf("%f ",a.get(0));
             //printf("%f ",a.get(1));
             //printf("%f ",a.get(2));
             //printf("%f ",a.get(3));
             //split_matrix<N>(matrix_B,2,2,n);
-            printf("%d %d %d\n",pivot,blocksize,N);
+            //printf("%d %d %d\n",pivot,blocksize,N);
             View<N> a_00(A,0,pivot,pivot,n);
             View<N> a_11(A,(pivot*n)+pivot,blocksize,blocksize,n);
             View<N> a_01(A,pivot,blocksize,pivot,n);
@@ -561,9 +617,9 @@ int main(void)
             //shouldnt this be two columns not 4
             View<N> a_02(A,pivot+blocksize,n-(blocksize+pivot),pivot,n); 
             View<N> a_20(A,(pivot*n)+(blocksize*n),pivot,n-(blocksize+pivot),n); // this might be blocksize squared for the general case
-            View<N> a_12(A,(pivot * n) + (pivot + blocksize)-1,n-(blocksize+pivot),blocksize,n); // this might be blocksize squared for the general case
-            View<N> a_21(A,((pivot + blocksize) * n) + pivot,blocksize-1,n-(blocksize+pivot),n); // this might be blocksize squared for the general case    
-            solve_block<N>(a_11,a_12,a_21,a_22,n,handle,stream);
+            View<N> a_12(A,(pivot * n) + (pivot + blocksize),n-(blocksize+pivot),blocksize,n); // this might be blocksize squared for the general case
+            View<N> a_21(A,((pivot + blocksize) * n) + pivot,blocksize,n-(blocksize+pivot),n); // this might be blocksize squared for the general case    
+            solve_block<N>(a_11,a_21,a_12,a_22,n,handle,stream);
             //printf("%d %d %d\n",pivot,blocksize,N);
             }
         
@@ -582,6 +638,7 @@ int main(void)
 
 
         construct_final_lu<<<BLK_IN_GRID, THR_PER_BLK>>>(d_A   ,d_L,d_U,n);
+        printf("\nLU INCOMMING\n");
         print_cuda_vec(d_L,n*n);
         printf("\n");
         print_cuda_vec(d_U,n*n);
